@@ -1,0 +1,60 @@
+version: "3.9"
+
+services:
+  frontend:
+    image: docker.io/swapnilneo/hack-frontend:${TAG}
+    ports:
+      - "8081:80"
+    environment:
+      BACKEND_URL: http://backend:8080
+      VITE_API_URL: /api
+      CITYASSIST_API_URL: http://python:8000
+    depends_on:
+      - backend
+      - python
+    networks:
+      - appnet
+
+  backend:
+    image: docker.io/swapnilneo/hack-backend:${TAG}
+    environment:
+      DB_URL: jdbc:postgresql://postgres:5432/hackdb
+      DB_USERNAME: postgres
+      DB_PASSWORD: postgres
+      PYTHON_URL: http://python:8000
+    depends_on:
+      - postgres
+      - python
+    ports:
+      - "8080:8080"
+    networks:
+      - appnet
+
+  python:
+    image: docker.io/swapnilneo/hack-python:${TAG}
+    ports:
+      - "8000:8000"
+    networks:
+      - appnet
+
+  postgres:
+    image: postgres:16
+    container_name: hack-postgres
+    restart: always
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: hackdb
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks:
+      - appnet
+
+networks:
+  appnet:
+    driver: bridge
+
+volumes:
+  pgdata:
