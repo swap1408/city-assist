@@ -11,7 +11,9 @@ pipeline {
         BACKEND_IMAGE  = 'hack-backend'
         FRONTEND_IMAGE = 'hack-frontend'
         PYTHON_IMAGE   = 'hack-python'
+
         TAG            = "${env.BUILD_NUMBER}"
+
         SSH_HOST       = 'ubuntu@172.31.16.10'
         DEPLOY_PATH    = '/home/ubuntu/Hackathon'
         TAG_FILE       = '/home/ubuntu/Hackathon/.last_successful_tag'
@@ -43,6 +45,7 @@ pipeline {
                             passwordVariable: 'DOCKER_PASS'
                         )
                     ]) {
+
                         sh '''
                             echo "$DOCKER_PASS" | docker login -u "$DOCKER_USER" --password-stdin
 
@@ -59,28 +62,18 @@ pipeline {
             }
         }
 
-        stage('Copy docker-compose.yml If Changed') {
+        stage('Copy docker-compose.yml to EC2') {
             steps {
                 script {
-                    def changed = sh(
-                        script: "git diff --name-only HEAD~1 HEAD | grep 'docker-compose.yml' || true",
-                        returnStdout: true
-                    ).trim()
+                    withCredentials([sshUserPrivateKey(
+                        credentialsId: 'ansible-ssh-key',
+                        keyFileVariable: 'SSH_KEY'
+                    )]) {
 
-                    if (changed) {
-                        echo "docker-compose.yml changed → Copying to EC2"
-
-                        withCredentials([sshUserPrivateKey(
-                            credentialsId: 'ansible-ssh-key',
-                            keyFileVariable: 'SSH_KEY'
-                        )]) {
-
-                            sh '''
-                                scp -o StrictHostKeyChecking=no -i $SSH_KEY docker-compose.yml $SSH_HOST:$DEPLOY_PATH/
-                            '''
-                        }
-                    } else {
-                        echo "docker-compose.yml not changed → Skipping copy"
+                        sh '''
+                            echo "📤 Copying docker-compose.yml to EC2..."
+                            scp -o StrictHostKeyChecking=no -i $SSH_KEY docker-compose.yml $SSH_HOST:$DEPLOY_PATH/
+                        '''
                     }
                 }
             }
@@ -89,57 +82,64 @@ pipeline {
         stage('Deploy to EC2 with Rollback') {
             steps {
                 script {
-                    withCredentials([
-                        sshUserPrivateKey(
-                            credentialsId: 'ansible-ssh-key',
-                            keyFileVariable: 'SSH_KEY'
-                        )
-                    ]) {
+                    withCredentials([sshUserPrivateKey(
+                        credentialsId: 'ansible-ssh-key',
+                        keyFileVariable: 'SSH_KEY'
+                    )]) {
 
                         try {
 
+                            // MAIN DEPLOY
                             sh '''
                                 ssh -o StrictHostKeyChecking=no -i $SSH_KEY $SSH_HOST '
-                                    echo "📌 Saving previous TAG..."
-                                    PREV_TAG="unknown"
+                                    
+                                    echo "📌 Loading previous tag..."
+                                    PREV_TAG="none"
                                     if [ -f $TAG_FILE ]; then
                                         PREV_TAG=$(cat $TAG_FILE)
                                     fi
+
                                     echo "Previous Tag: $PREV_TAG"
 
-                                    echo "🔻 Stopping old containers..."
+                                    cd '"$DEPLOY_PATH"'
+
+                                    echo "🔻 Stopping current containers"
                                     docker-compose down || true
 
-                                    echo "📥 Pulling new images with TAG: '"$TAG"'..."
+                                    echo "📥 Pulling images for TAG: '"$TAG"'"
                                     export TAG='"$TAG"'
                                     docker-compose pull
 
-                                    echo "🚀 Starting new containers..."
+                                    echo "🚀 Starting new version"
                                     docker-compose up -d --force-recreate
 
-                                    echo "💾 Saving new TAG to file..."
+                                    echo "💾 Saving new tag"
                                     echo '"$TAG"' > $TAG_FILE
 
-                                    echo "🧹 Cleaning unused Docker data..."
-                                    docker system prune -a -f --volumes
+                                    echo "🧹 Cleaning unused Docker images"
+                                    docker system prune -a -f
                                 '
                             '''
 
                         } catch (Exception e) {
 
-                            echo "❌ Deployment FAILED — Running Rollback!"
+                            echo "❌ Deployment failed — Performing rollback!"
 
+                            // ROLLBACK
                             sh '''
                                 ssh -o StrictHostKeyChecking=no -i $SSH_KEY $SSH_HOST '
+
                                     if [ -f $TAG_FILE ]; then
                                         ROLLBACK_TAG=$(cat $TAG_FILE)
-                                        echo "Rolling back to previous version: $ROLLBACK_TAG"
+                                        echo "Rolling back to: $ROLLBACK_TAG"
 
                                         export TAG=$ROLLBACK_TAG
+                                        cd '"$DEPLOY_PATH"'
                                         docker-compose pull
                                         docker-compose up -d --force-recreate
+
                                     else
-                                        echo "⚠️ No previous TAG found — rollback not possible"
+                                        echo "⚠️ No previous version to roll back to!"
                                     fi
                                 '
                             '''
